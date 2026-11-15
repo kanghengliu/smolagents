@@ -175,10 +175,11 @@ def get_tool_json_schema(tool: Tool) -> Dict:
     }
 
 
-def remove_stop_sequences(content: str, stop_sequences: List[str]) -> str:
+def remove_content_after_stop_sequences(content: str, stop_sequences: List[str]) -> str:
+    """Remove content after any stop sequence is encountered."""
     for stop_seq in stop_sequences:
-        if content[-len(stop_seq) :] == stop_seq:
-            content = content[: -len(stop_seq)]
+        split = content.split(stop_seq)
+        content = split[0]
     return content
 
 
@@ -292,6 +293,10 @@ class Model:
         self.last_input_token_count = None
         self.last_output_token_count = None
 
+    @property
+    def supports_stop_parameter(self) -> bool:
+        return supports_stop_parameter(getattr(self, "model_id", None) or "")
+
     def _prepare_completion_kwargs(
         self,
         messages: List[Dict[str, str]],
@@ -327,7 +332,7 @@ class Model:
         # Handle specific parameters
         if stop_sequences is not None:
             # Some models do not support stop parameter
-            if supports_stop_parameter(self.model_id):
+            if self.supports_stop_parameter:
                 completion_kwargs["stop"] = stop_sequences
         if grammar is not None:
             completion_kwargs["grammar"] = grammar
@@ -523,6 +528,8 @@ class VLLMModel(Model):
             sampling_params=sampling_params,
         )
         output_text = out[0].outputs[0].text
+        if stop_sequences is not None and not self.supports_stop_parameter:
+            output_text = remove_content_after_stop_sequences(output_text, stop_sequences)
         self.last_input_token_count = len(out[0].prompt_token_ids)
         self.last_output_token_count = len(out[0].outputs[0].token_ids)
         chat_message = ChatMessage(
@@ -632,6 +639,8 @@ class MLXModel(Model):
             if any((stop_index := text.rfind(stop)) != -1 for stop in stops):
                 text = text[:stop_index]
                 break
+        if stop_sequences is not None and not self.supports_stop_parameter:
+            text = remove_content_after_stop_sequences(text, stop_sequences)
 
         chat_message = ChatMessage(
             role=MessageRole.ASSISTANT, content=text, raw={"out": text, "completion_kwargs": completion_kwargs}
@@ -834,7 +843,7 @@ class TransformersModel(Model):
         self.last_output_token_count = len(generated_tokens)
 
         if stop_sequences is not None:
-            output_text = remove_stop_sequences(output_text, stop_sequences)
+            output_text = remove_content_after_stop_sequences(output_text, stop_sequences)
 
         chat_message = ChatMessage(
             role=MessageRole.ASSISTANT,
@@ -981,6 +990,8 @@ class LiteLLMModel(ApiModel):
             response.choices[0].message.model_dump(include={"role", "content", "tool_calls"}),
             raw=response,
         )
+        if stop_sequences is not None and not self.supports_stop_parameter:
+            first_message.content = remove_content_after_stop_sequences(first_message.content, stop_sequences)
         return self.postprocess_message(first_message, tools_to_call_from)
 
 
@@ -1092,6 +1103,8 @@ class InferenceClientModel(ApiModel):
         self.last_input_token_count = response.usage.prompt_tokens
         self.last_output_token_count = response.usage.completion_tokens
         first_message = ChatMessage.from_dict(asdict(response.choices[0].message), raw=response)
+        if stop_sequences is not None and not self.supports_stop_parameter:
+            first_message.content = remove_content_after_stop_sequences(first_message.content, stop_sequences)
         return self.postprocess_message(first_message, tools_to_call_from)
 
 
@@ -1191,6 +1204,8 @@ class OpenAIServerModel(ApiModel):
             response.choices[0].message.model_dump(include={"role", "content", "tool_calls"}),
             raw=response,
         )
+        if stop_sequences is not None and not self.supports_stop_parameter:
+            first_message.content = remove_content_after_stop_sequences(first_message.content, stop_sequences)
         return self.postprocess_message(first_message, tools_to_call_from)
 
 
@@ -1418,6 +1433,8 @@ class AmazonBedrockServerModel(ApiModel):
         # Get first message
         response["output"]["message"]["content"] = response["output"]["message"]["content"][0]["text"]
         first_message = ChatMessage.from_dict(response["output"]["message"], raw=response)
+        if stop_sequences is not None and not self.supports_stop_parameter:
+            first_message.content = remove_content_after_stop_sequences(first_message.content, stop_sequences)
 
         return self.postprocess_message(first_message, tools_to_call_from)
 
